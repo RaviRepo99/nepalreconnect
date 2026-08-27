@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   icons: {
     icon: "/icon.svg",
   },
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"),
+  metadataBase: new URL(process.env.SITE_URL || "http://localhost:3000"),
   openGraph: {
     type: "website",
     locale: "en_NP",
