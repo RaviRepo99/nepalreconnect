@@ -154,8 +154,10 @@ export default function Home() {
     const mode = window.localStorage.getItem("google-auth-mode");
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
     if (mode === "login" && !profile?.registered) {
-      const { error: profileError } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null, avatar_url: sessionUser.user_metadata?.avatar_url || null, registered: true }, { onConflict: "id" });
-      if (profileError) { await supabase.auth.signOut(); setUser(null); setNotice("Your account is not registered. Create an account first."); return; }
+      await supabase.auth.signOut();
+      setUser(null);
+      setNotice("Your account is not registered. Create an account first.");
+      return;
     }
     if (mode === "register") {
       await supabase.from("profiles").update({ registered: true }).eq("id", sessionUser.id);
