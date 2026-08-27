@@ -143,6 +143,7 @@ export default function Home() {
       if (supabase) void supabase.auth.signOut();
       setUser(null);
       setUserRole("user");
+      setView("home");
       setNotice("You have been logged out.");
     };
     logoutButton.addEventListener("click", logout, true);
