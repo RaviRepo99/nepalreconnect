@@ -175,7 +175,7 @@ export default function Home() {
     setNotice("You have been logged out. Sign in again to continue.");
   }
 
-  async function finishGoogleAuth(sessionUser: User) {
+  async function finishGoogleAuth(sessionUser: User, announce = true) {
     if (!supabase) return;
     const mode = window.localStorage.getItem("google-auth-mode");
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
@@ -193,14 +193,14 @@ export default function Home() {
     setUserId(sessionUser.id);
     setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     setShowAuth(false);
-    setNotice("Login successful. Welcome back.");
+    if (announce) setNotice("Login successful. Welcome back.");
   }
 
   useEffect(() => {
     if (!supabase) return;
     void supabase.auth.getSession().then(({ data }) => {
       const sessionUser = data.session?.user;
-      if (sessionUser) void finishGoogleAuth(sessionUser);
+      if (sessionUser) void finishGoogleAuth(sessionUser, false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       const sessionUser = session?.user;
@@ -212,7 +212,7 @@ export default function Home() {
         setNotice("");
         return;
       }
-      if (sessionUser) void finishGoogleAuth(sessionUser);
+      if (sessionUser) void finishGoogleAuth(sessionUser, event !== "INITIAL_SESSION");
     });
     return () => listener.subscription.unsubscribe();
   }, []);
