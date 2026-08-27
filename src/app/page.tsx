@@ -19,6 +19,7 @@ const demoReports: Report[] = [
   { id: "NR-26-00398", kind: "Found", name: "Maya Rai", age: "Approx. 63", gender: "Female", district: "Sunsari", province: "Koshi", location: "Dharan, Sunsari", date: "09 Aug 2026", status: "Reconnected", description: "Found and reunited with family after verification.", photo: "MR", verification: "Approved" },
 ];
 const provinces = ["All provinces", "Koshi", "Madhesh", "Bagmati", "Gandaki", "Lumbini", "Karnali", "Sudurpashchim"];
+const productionAuthRedirect = "https://nepalreconnect.ccrcitclub.com";
 
 function uniqueReports(reports: Report[]): Report[] {
   return [...new Map(reports.map((report) => [report.id, report])).values()].map((report) => (
@@ -73,7 +74,11 @@ export default function Home() {
     window.localStorage.setItem("google-auth-mode", authMode);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: window.location.origin },
+      options: {
+        redirectTo: window.location.hostname === "localhost"
+          ? window.location.origin
+          : productionAuthRedirect,
+      },
     });
     if (error) setNotice(`Google sign in failed: ${error.message}`);
   }
