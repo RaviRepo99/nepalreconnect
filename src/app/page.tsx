@@ -166,6 +166,7 @@ export default function Home() {
     window.localStorage.removeItem("google-auth-mode");
     setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     setShowAuth(false);
+    setNotice("Login successful. Welcome back.");
   }
 
   useEffect(() => {
