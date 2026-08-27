@@ -80,17 +80,22 @@ create policy "Public can read approved reports"
   on public.reports for select
   using (verification = 'Approved' or owner = auth.uid()::text);
 
-create policy "Public can create reports"
+drop policy if exists "Public can create reports" on public.reports;
+drop policy if exists "Authenticated users can create their reports" on public.reports;
+create policy "Authenticated users can create their reports"
   on public.reports for insert
-  to anon, authenticated
-  with check (true);
+  to authenticated
+  with check (owner = auth.uid()::text);
 
-create policy "Public can update reports"
+drop policy if exists "Public can update reports" on public.reports;
+drop policy if exists "Users can update their reports" on public.reports;
+create policy "Users can update their reports"
   on public.reports for update
-  to anon, authenticated
-  using (true)
-  with check (true);
+  to authenticated
+  using (owner = auth.uid()::text)
+  with check (owner = auth.uid()::text);
 
+drop policy if exists "Users can delete their reports" on public.reports;
 create policy "Users can delete their reports"
   on public.reports for delete
   to authenticated
