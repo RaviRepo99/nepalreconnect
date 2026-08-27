@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { reportPhotoBucket, supabase, supabaseConfigError } from "@/lib/supabase";
 import type { User } from "@supabase/supabase-js";
 
@@ -33,6 +34,7 @@ function displayKind(report: Report) {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [reports, setReports] = useState<Report[]>([]);
   const [view, setView] = useState<"home" | "reports" | "found" | "dashboard" | "admin">("home");
   const [kind, setKind] = useState<"Missing" | "Found">("Missing");
@@ -46,6 +48,8 @@ export default function Home() {
   const [verificationName, setVerificationName] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register" | "admin" | "forgot" | "reset">("login");
   const [user, setUser] = useState<string | null>(null); const [userId, setUserId] = useState<string | null>(null); const [userRole, setUserRole] = useState<"user" | "admin">("user"); const [notice, setNotice] = useState("");
+  const logoutInProgress = useRef(false);
+  const reportSubmitInProgress = useRef(false);
   const userReports = reports.filter((report) => report.owner === userId);
   const submittedReports = reports.filter((report) => report.owner);
   const activeReportCount = submittedReports.filter((report) => report.status !== "Reconnected").length;
@@ -59,19 +63,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const menuButton = document.querySelector<HTMLButtonElement>(".menu-button");
-    if (!menuButton) return;
-    const toggleMenu = () => setMenuOpen((open) => !open);
-    menuButton.addEventListener("click", toggleMenu);
-    return () => menuButton.removeEventListener("click", toggleMenu);
-  }, []);
-
-  useEffect(() => {
     document.querySelector(".topbar")?.classList.toggle("menu-open", menuOpen);
   }, [menuOpen]);
 
   async function handleGoogleAuth() {
     if (!supabase) { setNotice("Supabase is not configured."); return; }
+    logoutInProgress.current = false;
     window.localStorage.setItem("google-auth-mode", authMode);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
@@ -86,6 +83,7 @@ export default function Home() {
 
   async function handleEmailAuth() {
     if (!supabase) { setNotice("Supabase is not configured."); return; }
+    if (authMode === "login" || authMode === "register") logoutInProgress.current = false;
     const email = document.querySelector<HTMLInputElement>(".auth-modal input[type=email]")?.value.trim() || "";
     const password = document.querySelector<HTMLInputElement>(".auth-modal input[type=password]")?.value || "";
     const fullName = document.querySelector<HTMLInputElement>(".auth-modal input[type=text]")?.value.trim() || "";
@@ -135,28 +133,31 @@ export default function Home() {
         return;
       }
       if (registeredUser) await supabase.from("profiles").update({ registered: true, full_name: fullName || null }).eq("id", registeredUser.id);
-      setUserId(registeredUser?.id || null); setUser(email); setShowAuth(false); setNotice("Account created and email verified."); return;
+      await supabase.auth.signOut();
+      router.push("/login");
+      return;
     }
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) { setNotice("Your account is not registered or the password is incorrect. Create an account first."); return; }
+    setUserId(data.user.id); setUser(email);
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
-    if (!profile?.registered) { await supabase.auth.signOut(); setNotice("Your account is not registered or has not been verified. Create an account first."); return; }
-    setUserId(data.user.id); setUser(email); setShowAuth(false); setNotice("Welcome back.");
+    if (!profile?.registered) { await supabase.auth.signOut(); setUser(null); setUserId(null); setNotice("Your account is not registered or has not been verified. Create an account first."); return; }
+    setShowAuth(false); setNotice("Welcome back.");
   }
 
   async function verifyEmailCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    logoutInProgress.current = false;
     if (!supabase || verificationCode.trim().length !== 8) { setNotice("Enter the 8-digit verification code from your email."); return; }
     const { data, error } = await supabase.auth.verifyOtp({ email: verificationEmail, token: verificationCode.trim(), type: "signup" });
     if (error) { setNotice(`Email verification failed: ${error.message}`); return; }
     if (data.user) await supabase.from("profiles").update({ registered: true, full_name: verificationName || null }).eq("id", data.user.id);
-    setUserId(data.user?.id || null);
-    setUser(data.user?.email || verificationEmail);
-    setShowVerification(false);
-    setNotice("Account created and email verified.");
+    await supabase.auth.signOut();
+    router.push("/login");
   }
 
   async function handleLogout() {
+    logoutInProgress.current = true;
     if (supabase) {
       const { error } = await supabase.auth.signOut();
       if (error) { setNotice(`Could not log out: ${error.message}`); return; }
@@ -164,20 +165,15 @@ export default function Home() {
     window.localStorage.removeItem("google-auth-mode");
     window.localStorage.removeItem("nepal-reconnect-reports");
     setReports((currentReports) => currentReports.filter((report) => report.owner !== userId));
-    setUser(null);
-    setUserId(null);
-    setUserRole("user");
-    setView("home");
-    setShowForm(false);
-    setEditingReport(null);
-    setAuthMode("login");
-    setShowAuth(true);
-    setNotice("You have been logged out. Sign in again to continue.");
+    window.location.href = "/";
   }
 
   async function finishGoogleAuth(sessionUser: User, announce = true) {
     if (!supabase) return;
+    if (logoutInProgress.current) return;
     const mode = window.localStorage.getItem("google-auth-mode");
+    setUserId(sessionUser.id);
+    setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
     if (mode === "login" && !profile?.registered) {
       await supabase.auth.signOut();
@@ -187,11 +183,9 @@ export default function Home() {
       return;
     }
     if (mode === "register") {
-      await supabase.from("profiles").update({ registered: true }).eq("id", sessionUser.id);
+      await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
     }
     window.localStorage.removeItem("google-auth-mode");
-    setUserId(sessionUser.id);
-    setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     setShowAuth(false);
     if (announce) setNotice("Login successful. Welcome back.");
   }
@@ -280,7 +274,7 @@ export default function Home() {
     const isPublic = !report.owner || report.verification === "Approved";
     return isPublic && matchesKind && (province === "All provinces" || report.province === province) && haystack.includes(search.toLowerCase());
   }), [reports, reportsLoading, view, kind, province, search]);
-  function openAuth(mode: "login" | "register" | "admin" = "login") { setAuthMode(mode); setShowAuth(true); setNotice(""); }
+  function openAuth(mode: "login" | "register" | "admin" = "login") { window.location.href = mode === "register" ? "/register" : "/login"; }
   function startReport(nextKind: "Missing" | "Found") { if (!userId) { openAuth(); return; } setKind(nextKind); setShowForm(true); }
   function saveReports(next: Report[]) { setReports(next); if (!supabase) window.localStorage.setItem("nepal-reconnect-reports", JSON.stringify(next)); }
   async function deleteReport(id: string) {
@@ -302,33 +296,38 @@ export default function Home() {
     saveReports(reports.map((report) => report.id === id ? { ...report, status: "Reconnected", kind: "Found" } : report)); setNotice("Report marked as found and moved to Found reports.");
   }
   async function submitReport(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const data = new FormData(event.currentTarget);
-    if (supabaseConfigError) { setNotice(`${supabaseConfigError} Update .env.local and restart the dev server.`); return; }
-    if (!userId) { openAuth(); return; }
+    event.preventDefault();
+    if (reportSubmitInProgress.current) return;
+    reportSubmitInProgress.current = true;
+    setNotice("Publishing report...");
+    const data = new FormData(event.currentTarget);
+    if (supabaseConfigError) { reportSubmitInProgress.current = false; setNotice(`${supabaseConfigError} Update .env.local and restart the dev server.`); return; }
+    if (!userId) { reportSubmitInProgress.current = false; openAuth(); return; }
     const reportData = { kind, name: String(data.get("name")), age: String(data.get("age")), gender: String(data.get("gender")), district: String(data.get("district")), province: String(data.get("province")), location: String(data.get("location")), date: String(data.get("date")), status: "Active" as const, description: String(data.get("description")), photo: String(data.get("name")).slice(0, 2).toUpperCase(), owner: userId, verification: "Approved" as const, reporter: String(data.get("reporter")), phone: String(data.get("phone")), email: String(data.get("email")) };
     const newReport: Report = editingReport ? { ...editingReport, ...reportData } : { id: `NR-26-${Math.floor(10000 + Math.random() * 89999)}`, ...reportData };
     if (supabase) {
       const photoFile = event.currentTarget.querySelector<HTMLInputElement>('input[type="file"]')?.files?.[0] || null;
       let photoUrl: string | null = null;
-      if (!photoFile && !newReport.photo.startsWith("http")) { setNotice("Please upload a photo before saving this report."); return; }
+      if (!photoFile && !newReport.photo.startsWith("http")) { reportSubmitInProgress.current = false; setNotice("Please upload a photo before saving this report."); return; }
       if (photoFile instanceof File && photoFile.size > 0) {
         const filePath = `${userId}/${newReport.id}-${photoFile.name}`;
         const upload = await supabase.storage.from(reportPhotoBucket).upload(filePath, photoFile, { upsert: true, contentType: photoFile.type });
-        if (upload.error) { setNotice(`Could not upload photo: ${upload.error.message}`); return; }
+        if (upload.error) { reportSubmitInProgress.current = false; setNotice(`Could not upload photo: ${upload.error.message}`); return; }
         photoUrl = supabase.storage.from(reportPhotoBucket).getPublicUrl(filePath).data.publicUrl;
       }
       const payload = { id: newReport.id, kind: newReport.kind, name: newReport.name, age: newReport.age, gender: newReport.gender, district: newReport.district, province: newReport.province, location: newReport.location, report_date: newReport.date, status: newReport.status, verification: newReport.verification, description: newReport.description, reporter: newReport.reporter || "", phone: newReport.phone || "", email: newReport.email || "", photo: photoUrl || newReport.photo, owner: userId };
       const result = editingReport ? await supabase.from("reports").update(payload).eq("id", newReport.id).eq("owner", userId).select("id") : await supabase.from("reports").insert(payload).select("id");
-      if (result.error) { setNotice(`Could not save to Supabase: ${result.error.message}`); return; }
-      if (!result.data?.length) { setNotice("This report is not owned by your account."); return; }
+      if (result.error) { reportSubmitInProgress.current = false; setNotice(`Could not save to Supabase: ${result.error.message}`); return; }
+      if (!result.data?.length) { reportSubmitInProgress.current = false; setNotice("This report is not owned by your account."); return; }
     }
     const next = [newReport, ...reports.filter((report) => !demoReports.includes(report) && report.id !== newReport.id)]; setReports(next); if (!supabase) window.localStorage.setItem("nepal-reconnect-reports", JSON.stringify(next)); setShowForm(false); setNotice(editingReport ? `Report ${newReport.id} updated.` : `Report submitted. Your Report ID is ${newReport.id}`); setView("dashboard");
     setEditingReport(null);
+    reportSubmitInProgress.current = false;
   }
 
   if (showVerification) return <main className="site-shell verification-page"><section className="verification-card"><span className="brand-mark large">NR</span><p className="eyebrow">Verify your email</p><h1>Check your inbox</h1><p>We sent an 8-digit verification code to <strong>{verificationEmail}</strong>.</p><p className="verification-hint">Can&apos;t find it? Please check your spam or junk folder.</p><form onSubmit={verifyEmailCode}><label>8-digit verification code<input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" pattern="[0-9]{8}" maxLength={8} autoFocus required /></label><button className="primary-button full" type="submit">Verify email</button></form><button className="text-button center" onClick={() => { window.localStorage.removeItem("google-auth-mode"); setShowVerification(false); setAuthMode("register"); setShowAuth(true); }}>Back to account</button></section></main>;
   return <main className="site-shell">
-    <header className="topbar"><button className="brand" onClick={() => setView("home")} aria-label="Nepal Reconnect home"><Image className="brand-logo" src="/media/nepalreconnect.png" alt="Nepal Reconnect" width={2200} height={700} priority /></button><nav><button className={view === "home" ? "active" : ""} onClick={() => setView("home")}>Home</button><button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}>Public reports</button><button onClick={() => userId ? setView(userRole === "admin" ? "admin" : "dashboard") : openAuth()}>My dashboard</button></nav><div className="account">{userId ? <button className="outline-button" onClick={() => void handleLogout()}>Log out</button> : <button className="outline-button" onClick={() => openAuth()}>Sign in</button>}<button className="menu-button">☰</button></div></header>
+    <header className="topbar"><button className="brand" onClick={() => { setView("home"); setMenuOpen(false); }} aria-label="Nepal Reconnect home"><Image className="brand-logo" src="/media/nepalreconnect.png" alt="Nepal Reconnect" width={2200} height={700} priority /></button><nav><button className={view === "home" ? "active" : ""} onClick={() => { setView("home"); setMenuOpen(false); }}>Home</button><button className={view === "reports" ? "active" : ""} onClick={() => { setView("reports"); setMenuOpen(false); }}>Public reports</button><button onClick={() => { setMenuOpen(false); userId ? setView(userRole === "admin" ? "admin" : "dashboard") : openAuth(); }}>My dashboard</button></nav><div className="account">{userId ? <button className="outline-button" onClick={() => void handleLogout()}>Log out</button> : <button className="outline-button" onClick={() => openAuth()}>Sign in</button>}<button className="menu-button" type="button" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>☰</button></div></header>
     {notice && !showAuth && !showVerification && <div className="notice" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
     {showAuth && notice && <div className="auth-notice" role="status">{notice}</div>}
     {view === "home" && <><section className="hero"><div className="hero-copy"><p className="eyebrow">A public service for Nepal</p><h1>Let&apos;s reconnect<br /><em>missing loved ones.</em></h1><p className="hero-lede">A trusted place to report, search and safely reconnect families across Nepal.</p><div className="hero-actions"><button className="primary-button" onClick={() => startReport("Missing")}><span>+</span> Report missing</button><button className="found-button" onClick={() => startReport("Found")}><span>✓</span> Report found</button></div><div className="hero-note"><span className="shield">✓</span><span>Reports are reviewed by our verification team.<br /><b>Your contact details stay private.</b></span></div></div><div className="hero-art"><Image className="hero-cover" src="/media/banner2.png" alt="Nepal Reconnect cover banner" width={1664} height={941} priority /></div></section><section className="search-panel"><div><p className="eyebrow">Find a report</p><h2>Search the national register</h2></div><div className="search-controls"><label className="search-input"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, district, location or Report ID" /></label><button className="primary-button small" onClick={() => setView("reports")}>Search reports</button></div></section><section className="info-band"><div><span className="stat-number">{activeReportCount.toLocaleString()}</span><span className="stat-label">active reports</span></div><div><span className="stat-number">{reconnectedReportCount.toLocaleString()}</span><span className="stat-label">reconnected this year</span></div><p>For urgent danger or immediate help, call Nepal Police <b>100</b></p></section><section className="home-reports"><div className="section-heading"><div><p className="eyebrow">Latest missing reports</p><h2>People who need to be found</h2></div><button className="text-button" onClick={() => { setKind("Missing"); setView("reports"); }}>View all missing reports →</button></div><div className="report-grid">{publicMissingReports.slice(0, 3).map((report) => <ReportCard key={report.id} report={report} />)}</div></section></>}
@@ -337,7 +336,7 @@ export default function Home() {
     <footer><div className="brand footer-brand"><Image className="brand-logo" src="/media/white.png" alt="Nepal Reconnect" width={2200} height={700} /></div><div className="footer-copy"><p>A safer way home for every family.</p><small>© 2026 Nepal Reconnect. All rights reserved.</small></div><div><a href="#privacy">Privacy policy</a><a href="#terms">Terms of use</a><a href="#abuse">Report abuse</a></div></footer>
     {selectedReport && <div className="modal-backdrop" onClick={() => setSelectedReport(null)}><article className="modal detail-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setSelectedReport(null)}>×</button><div className={`detail-photo person-photo ${selectedReport.kind.toLowerCase()}`}>{selectedReport.photo.startsWith("http") ? <Image src={selectedReport.photo} alt={selectedReport.name} fill sizes="(max-width: 700px) 100vw, 420px" /> : <span>{selectedReport.photo}</span>}<i>{selectedReport.kind}</i></div><div className="detail-body"><div className="report-top"><span className={`tag ${selectedReport.kind.toLowerCase()}`}>{selectedReport.kind}</span><span className="report-id">{selectedReport.id}</span></div><h2>{selectedReport.name}</h2><div className="detail-facts"><span><b>Age</b>{selectedReport.age}</span><span><b>Gender</b>{selectedReport.gender}</span><span><b>Date</b>{selectedReport.date}</span><span><b>Location</b>{selectedReport.location}</span></div><h3>Description</h3><p>{selectedReport.description}</p><h3>Contact details</h3><div className="detail-contact"><span><b>Reported by</b>{selectedReport.reporter || "Not provided"}</span><span><b>Phone</b>{selectedReport.phone || "Not provided"}</span><span><b>Email</b>{selectedReport.email || "Not provided"}</span></div><div className="detail-private">Please use these contact details responsibly and only for helping reconnect this person with their family.</div></div></article></div>}
     {showAuth && <div className="modal-backdrop" onClick={() => setShowAuth(false)}><div className="modal auth-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowAuth(false)}>×</button><span className="brand-mark large">NR</span><p className="eyebrow">{authMode === "admin" ? "Restricted access" : "Secure access"}</p><h2>{authMode === "login" ? "Sign in to report" : authMode === "forgot" ? "Recover your account" : authMode === "reset" ? "Set a new password" : authMode === "admin" ? "Administrator sign in" : "Create your account"}</h2><p>{authMode === "login" ? "Log in to submit a report and keep your family’s information protected." : authMode === "forgot" ? "Enter your email and we will send you a secure password reset link." : authMode === "reset" ? "Choose a new password for your Nepal Reconnect account." : authMode === "admin" ? "This area is reserved for verified Nepal Reconnect administrators." : "Create a secure account to submit and track your reports."}</p>{authMode === "register" && <label>Full name<input type="text" placeholder="Your full name" /></label>}{authMode !== "reset" && <label>Email address<input type="email" placeholder={authMode === "admin" ? "admin@nepalreconnect.org" : "you@example.com"} /></label>}{authMode !== "forgot" && <label>Password<input type="password" placeholder="••••••••" /></label>}{authMode === "reset" && <label>Confirm password<input name="confirm-password" type="password" placeholder="••••••••" /></label>}<button className="primary-button full" onClick={() => { if (authMode === "forgot" || authMode === "reset") { void handleEmailAuth(); return; } setUser(authMode === "admin" ? "Administrator" : "Demo user"); setUserRole(authMode === "admin" ? "admin" : "user"); setShowAuth(false); setNotice(authMode === "admin" ? "Administrator access granted." : authMode === "login" ? "Welcome to your secure dashboard." : "Your account has been created."); }}>{authMode === "login" ? "Sign in" : authMode === "forgot" ? "Send reset link" : authMode === "reset" ? "Update password" : authMode === "admin" ? "Enter admin panel" : "Create account"}</button>{authMode === "admin" ? <button className="text-button center" onClick={() => setAuthMode("login")}>Return to user sign in</button> : authMode === "login" ? <><button className="text-button center" onClick={() => setAuthMode("register")}>Create an account</button><button className="text-button center" onClick={() => setAuthMode("forgot")}>Forgot password?</button><button className="admin-link" onClick={() => setAuthMode("admin")}>Administrator access</button></> : authMode === "forgot" || authMode === "reset" ? <button className="text-button center" onClick={() => setAuthMode("login")}>Back to sign in</button> : <button className="text-button center" onClick={() => setAuthMode("login")}>Already have an account? Sign in</button>}<small className="muted">{authMode === "login" ? "Use your registered email and password to continue." : authMode === "admin" ? "Admin credentials are required." : authMode === "forgot" ? "The link will expire for your security." : authMode === "reset" ? "Use at least 8 characters for your new password." : "We will verify your email before publishing reports."}</small></div></div>}
-    {showForm && <div className="modal-backdrop" onClick={() => setShowForm(false)}><form className="modal report-modal" onSubmit={submitReport} onClick={(event) => event.stopPropagation()}><button type="button" className="modal-close" onClick={() => setShowForm(false)}>×</button><p className="eyebrow">{editingReport ? "Edit" : "New"} {kind.toLowerCase()} report</p><h2>Help bring someone home.</h2><p className="modal-intro">Only verified information is published. Your phone and email remain private.</p><div className="form-grid"><label>Name or approximate name<input name="name" required defaultValue={editingReport?.name} placeholder="Full name" /></label><label>Age<input name="age" required defaultValue={editingReport?.age} placeholder="Age" /></label><label>Gender<select name="gender" defaultValue={editingReport?.gender}><option>Male</option><option>Female</option><option>Other</option><option>Unknown</option></select></label><label>Province<select name="province" defaultValue={editingReport?.province}>{provinces.slice(1).map((item) => <option key={item}>{item}</option>)}</select></label><label>District<input name="district" required defaultValue={editingReport?.district} placeholder="District" /></label><label>Last seen / found date<input name="date" required type="date" defaultValue={editingReport?.date} /></label><label className="wide">Location<input name="location" required defaultValue={editingReport?.location} placeholder="Municipality, ward or landmark" /></label><label className="wide">Photo upload<input type="file" accept="image/*" /></label><label className="wide">Description and identifying marks<textarea name="description" required defaultValue={editingReport?.description} placeholder="Clothing, marks, language, or other helpful details" /></label></div><div className="private-fields"><b>Reporter contact</b><label>Your name<input name="reporter" required defaultValue={editingReport?.reporter} placeholder="Your full name" /></label><label>Phone number<input name="phone" required defaultValue={editingReport?.phone} placeholder="98XXXXXXXX" /></label><label>Email address<input name="email" required defaultValue={editingReport?.email} type="email" placeholder="you@example.com" /></label></div><button className="primary-button full" type="submit">{editingReport ? "Save changes" : "Publish report"}</button></form></div>}
+    {showForm && <div className="modal-backdrop" onClick={() => setShowForm(false)}><form className="modal report-modal" onSubmit={submitReport} onClick={(event) => event.stopPropagation()}><button type="button" className="modal-close" onClick={() => setShowForm(false)}>×</button><p className="eyebrow">{editingReport ? "Edit" : "New"} {kind.toLowerCase()} report</p><h2>Help bring someone home.</h2><p className="modal-intro">Only verified information is published. Your phone and email remain private.</p><div className="form-grid"><label>Name or approximate name<input name="name" required defaultValue={editingReport?.name} placeholder="Full name" /></label><label>Age<input name="age" required defaultValue={editingReport?.age} placeholder="Age" /></label><label>Gender<select name="gender" defaultValue={editingReport?.gender}><option>Male</option><option>Female</option><option>Other</option><option>Unknown</option></select></label><label>Province<select name="province" defaultValue={editingReport?.province}>{provinces.slice(1).map((item) => <option key={item}>{item}</option>)}</select></label><label>District<input name="district" required defaultValue={editingReport?.district} placeholder="District" /></label><label>Last seen / found date<input name="date" required type="date" defaultValue={editingReport?.date} /></label><label className="wide">Location<input name="location" required defaultValue={editingReport?.location} placeholder="Municipality, ward or landmark" /></label><label className="wide">Photo upload<input type="file" accept="image/*" /></label><label className="wide">Description and identifying marks<textarea name="description" required defaultValue={editingReport?.description} placeholder="Clothing, marks, language, or other helpful details" /></label></div><div className="private-fields"><b>Reporter contact</b><label>Your name<input name="reporter" required defaultValue={editingReport?.reporter} placeholder="Your full name" /></label><label>Phone number<input name="phone" required defaultValue={editingReport?.phone} placeholder="98XXXXXXXX" /></label><label>Email address<input name="email" required defaultValue={editingReport?.email} type="email" placeholder="you@example.com" /></label></div><button className="primary-button full" type="submit" disabled={reportSubmitInProgress.current}>{reportSubmitInProgress.current ? <><span className="publish-spinner" aria-hidden="true" /> Publishing...</> : editingReport ? "Save changes" : "Publish report"}</button></form></div>}
   </main>;
 }
 
