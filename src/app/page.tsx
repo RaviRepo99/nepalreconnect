@@ -68,21 +68,6 @@ export default function Home() {
     document.querySelector(".topbar")?.classList.toggle("menu-open", menuOpen);
   }, [menuOpen]);
 
-  async function handleGoogleAuth() {
-    if (!supabase) { setNotice("Supabase is not configured."); return; }
-    logoutInProgress.current = false;
-    window.localStorage.setItem("google-auth-mode", authMode);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: window.location.hostname === "localhost"
-          ? window.location.origin
-          : productionAuthRedirect,
-      },
-    });
-    if (error) setNotice(`Google sign in failed: ${error.message}`);
-  }
-
   async function handleEmailAuth() {
     if (!supabase) { setNotice("Supabase is not configured."); return; }
     if (authMode === "login" || authMode === "register") logoutInProgress.current = false;
@@ -134,9 +119,33 @@ export default function Home() {
         return;
       }
       if (data.user && (!data.user.identities || data.user.identities.length === 0)) {
+        const { data: existingLogin, error: existingLoginError } = await supabase.auth.signInWithPassword({ email, password });
+        if (existingLoginError || !existingLogin.user) {
+          window.localStorage.removeItem(pendingEmailSignup);
+          setNotice("This email already has an account. Please sign in with the correct password.");
+          setAuthMode("login");
+          return;
+        }
+        const { data: existingProfile, error: existingProfileError } = await supabase.from("profiles").select("registered").eq("id", existingLogin.user.id).maybeSingle();
+        if (existingProfileError) {
+          await supabase.auth.signOut();
+          window.localStorage.removeItem(pendingEmailSignup);
+          setNotice(`Could not check your account: ${existingProfileError.message}`);
+          return;
+        }
+        if (existingProfile?.registered) {
+          await supabase.auth.signOut();
+          window.localStorage.removeItem(pendingEmailSignup);
+          setAuthMode("login");
+          setNotice("This email already has an account. Please sign in.");
+          return;
+        }
+        const { error: profileError } = await supabase.from("profiles").upsert({ id: existingLogin.user.id, email, registered: true, full_name: fullName || null }, { onConflict: "id" });
+        await supabase.auth.signOut();
         window.localStorage.removeItem(pendingEmailSignup);
-        setNotice("Your account already exists. Please sign in.");
+        if (profileError) { setNotice(`Could not finish account creation: ${profileError.message}`); return; }
         setAuthMode("login");
+        setNotice("Your account was created. Please sign in.");
         return;
       }
       const registeredUser = data.user;
@@ -159,9 +168,15 @@ export default function Home() {
       return;
     }
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) { setNotice("Incorrect email or password. Check your details or create an account first."); return; }
+    if (error) { setNotice("Incorrect email or password. If you do not have an account, please create one first."); return; }
     setUserId(data.user.id); setUser(email);
-    const { data: profile } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
+    const { data: profile, error: profileError } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
+    if (profileError) {
+      await supabase.auth.signOut();
+      setUser(null); setUserId(null);
+      setNotice(`Could not check your account: ${profileError.message}`);
+      return;
+    }
     if (!profile?.registered) { await supabase.auth.signOut(); setUser(null); setUserId(null); setNotice("Your account is not registered or has not been verified. Create an account first."); return; }
     setShowAuth(false); setNotice("Welcome back.");
   }
@@ -208,8 +223,6 @@ export default function Home() {
       return;
     }
     const mode = window.localStorage.getItem("google-auth-mode");
-    setUserId(sessionUser.id);
-    setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
     if (mode === "login" && !profile?.registered) {
       await supabase.auth.signOut();
@@ -218,11 +231,28 @@ export default function Home() {
       setNotice("Your account is not registered. Create an account first.");
       return;
     }
+    if (!mode && !profile?.registered) {
+      await supabase.auth.signOut();
+      setUser(null);
+      setUserId(null);
+      return;
+    }
     if (mode === "register") {
+      if (profile?.registered) {
+        window.localStorage.removeItem("google-auth-mode");
+        await supabase.auth.signOut();
+        setUser(null);
+        setUserId(null);
+        setAuthMode("login");
+        setNotice("This email already has an account. Please sign in.");
+        return;
+      }
       const { error } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
       if (error) { await supabase.auth.signOut(); setUser(null); setUserId(null); setNotice(`Could not create your account: ${error.message}`); return; }
     }
     window.localStorage.removeItem("google-auth-mode");
+    setUserId(sessionUser.id);
+    setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
     setShowAuth(false);
     if (announce) setNotice("Login successful. Welcome back.");
   }
@@ -247,23 +277,6 @@ export default function Home() {
     });
     return () => listener.subscription.unsubscribe();
   }, []);
-
-  useEffect(() => {
-    if (authMode === "admin" || authMode === "forgot" || authMode === "reset") return;
-    const authButton = document.querySelector<HTMLButtonElement>(".auth-modal .primary-button");
-    if (!authButton) return;
-    const googleButton = document.createElement("button");
-    googleButton.type = "button";
-    googleButton.className = "google-auth-button";
-    const googleIcon = document.createElement("span");
-    googleIcon.className = "google-icon";
-    googleIcon.textContent = "G";
-    googleButton.append(googleIcon, "Continue with Google");
-    const googleClick = () => void handleGoogleAuth();
-    googleButton.addEventListener("click", googleClick);
-    authButton.before(googleButton);
-    return () => { googleButton.removeEventListener("click", googleClick); googleButton.remove(); };
-  }, [authMode, showAuth]);
 
   useEffect(() => {
     if (authMode === "admin" || authMode === "forgot" || authMode === "reset") return;
@@ -326,11 +339,16 @@ export default function Home() {
   }
   async function markReconnected(id: string) {
     if (!userId) { openAuth(); return; }
+    const report = reports.find((item) => item.id === id);
+    if (!report) { setNotice("This report could not be found."); return; }
     if (supabase) {
       const result = await supabase.from("reports").update({ status: "Reconnected", kind: "Found" }).eq("id", id).eq("owner", userId).select("id");
       if (result.error || !result.data?.length) { setNotice(result.error ? `Could not mark report as found: ${result.error.message}` : "This report is not owned by your account."); return; }
     }
-    saveReports(reports.map((report) => report.id === id ? { ...report, status: "Reconnected", kind: "Found" } : report)); setNotice("Report marked as found and moved to Found reports.");
+    const foundReport = { ...report, status: "Reconnected" as const, kind: "Found" as const };
+    const webhookResponse = await fetch("/api/discord-webhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(foundReport) });
+    saveReports(reports.map((item) => item.id === id ? foundReport : item));
+    setNotice(webhookResponse.ok ? "Report marked as found and sent to Discord." : "Report marked as found, but Discord notification could not be sent.");
   }
   async function submitReport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -342,6 +360,7 @@ export default function Home() {
     if (!userId) { reportSubmitInProgress.current = false; openAuth(); return; }
     const reportData = { kind, name: String(data.get("name")), age: String(data.get("age")), gender: String(data.get("gender")), district: String(data.get("district")), province: String(data.get("province")), location: String(data.get("location")), date: String(data.get("date")), status: "Active" as const, description: String(data.get("description")), photo: String(data.get("name")).slice(0, 2).toUpperCase(), owner: userId, verification: "Approved" as const, reporter: String(data.get("reporter")), phone: String(data.get("phone")), email: String(data.get("email")) };
     const newReport: Report = editingReport ? { ...editingReport, ...reportData } : { id: `NR-26-${Math.floor(10000 + Math.random() * 89999)}`, ...reportData };
+    let discordFailed = false;
     if (supabase) {
       const photoFile = event.currentTarget.querySelector<HTMLInputElement>('input[type="file"]')?.files?.[0] || null;
       let photoUrl: string | null = null;
@@ -356,8 +375,10 @@ export default function Home() {
       const result = editingReport ? await supabase.from("reports").update(payload).eq("id", newReport.id).eq("owner", userId).select("id") : await supabase.from("reports").insert(payload).select("id");
       if (result.error) { reportSubmitInProgress.current = false; setNotice(`Could not save to Supabase: ${result.error.message}`); return; }
       if (!result.data?.length) { reportSubmitInProgress.current = false; setNotice("This report is not owned by your account."); return; }
+      const webhookResponse = await fetch("/api/discord-webhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...newReport, photo: photoUrl || newReport.photo }) });
+      if (!webhookResponse.ok) discordFailed = true;
     }
-    const next = [newReport, ...reports.filter((report) => !demoReports.includes(report) && report.id !== newReport.id)]; setReports(next); if (!supabase) window.localStorage.setItem("nepal-reconnect-reports", JSON.stringify(next)); setShowForm(false); setNotice(editingReport ? `Report ${newReport.id} updated.` : `Report submitted. Your Report ID is ${newReport.id}`); setView("dashboard");
+    const next = [newReport, ...reports.filter((report) => !demoReports.includes(report) && report.id !== newReport.id)]; setReports(next); if (!supabase) window.localStorage.setItem("nepal-reconnect-reports", JSON.stringify(next)); setShowForm(false); setNotice(discordFailed ? "Report saved, but Discord notification could not be sent." : editingReport ? `Report ${newReport.id} updated.` : `Report submitted. Your Report ID is ${newReport.id}`); setView("dashboard");
     setEditingReport(null);
     reportSubmitInProgress.current = false;
   }

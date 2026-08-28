@@ -3,7 +3,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { FaGoogle } from "react-icons/fa6";
 import { supabase } from "@/lib/supabase";
 import type { User } from "@supabase/supabase-js";
 
@@ -11,6 +10,10 @@ const productionRedirect = "https://nepalreconnect.ccrcitclub.com";
 const pendingEmailSignup = "pending-email-signup";
 const emailVerificationInProgress = "email-verification-in-progress";
 type AuthMode = "login" | "register";
+
+function isEmailConfirmationCallback() {
+  return window.location.hash.includes("access_token") || window.location.search.includes("code=");
+}
 
 export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
   const router = useRouter();
@@ -41,6 +44,16 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
       return;
     }
     const googleMode = window.localStorage.getItem("google-auth-mode");
+    if (isEmailConfirmationCallback()) {
+      const { error } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
+      window.localStorage.removeItem(pendingEmailSignup);
+      await supabase.auth.signOut();
+      if (error) { setNotice(`Could not finish email confirmation: ${error.message}`); return; }
+      window.history.replaceState(null, "", "/login");
+      setAuthMode("login");
+      setNotice("Your email was verified and your account was created. Please sign in.");
+      return;
+    }
     if (googleMode === "register") {
       const { error } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
       window.localStorage.removeItem("google-auth-mode");
@@ -50,7 +63,12 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
       setNotice("Your account was created. Please sign in.");
       return;
     }
-    const { data: profile } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
+    const { data: profile, error: profileError } = await supabase.from("profiles").select("registered").eq("id", sessionUser.id).maybeSingle();
+    if (profileError) {
+      await supabase.auth.signOut();
+      setNotice(`Could not check your account: ${profileError.message}`);
+      return;
+    }
     if (!profile?.registered) {
       await supabase.auth.signOut();
       window.localStorage.removeItem("google-auth-mode");
@@ -76,16 +94,6 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
     });
     return () => listener.subscription.unsubscribe();
   }, []);
-
-  async function handleGoogle() {
-    if (!supabase) { setNotice("Supabase is not configured."); return; }
-    window.localStorage.setItem("google-auth-mode", authMode === "register" ? "register" : "login");
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.hostname === "localhost" ? `${window.location.origin}/login` : `${productionRedirect}/login` },
-    });
-    if (error) setNotice(`Google sign in failed: ${error.message}`);
-  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -133,6 +141,40 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
       });
       if (error) { window.localStorage.removeItem(pendingEmailSignup); setLoading(false); setNotice(error.message.toLowerCase().includes("already") ? "This email is already registered. Please sign in." : `Account creation failed: ${error.message}`); return; }
       if (!data.user) { window.localStorage.removeItem(pendingEmailSignup); setLoading(false); setNotice("Account creation did not complete. Please try again."); return; }
+      if (!data.user.identities?.length) {
+        const { data: existingLogin, error: existingLoginError } = await supabase.auth.signInWithPassword({ email, password });
+        if (existingLoginError || !existingLogin.user) {
+          window.localStorage.removeItem(pendingEmailSignup);
+          setLoading(false);
+          setAuthMode("login");
+          setNotice("This email already has an account. Please sign in with the correct password.");
+          return;
+        }
+        const { data: existingProfile, error: existingProfileError } = await supabase.from("profiles").select("registered").eq("id", existingLogin.user.id).maybeSingle();
+        if (existingProfileError) {
+          await supabase.auth.signOut();
+          window.localStorage.removeItem(pendingEmailSignup);
+          setLoading(false);
+          setNotice(`Could not check your account: ${existingProfileError.message}`);
+          return;
+        }
+        if (existingProfile?.registered) {
+          await supabase.auth.signOut();
+          window.localStorage.removeItem(pendingEmailSignup);
+          setLoading(false);
+          setAuthMode("login");
+          setNotice("This email already has an account. Please sign in.");
+          return;
+        }
+        const { error: profileError } = await supabase.from("profiles").upsert({ id: existingLogin.user.id, email, registered: true, full_name: fullName || null }, { onConflict: "id" });
+        await supabase.auth.signOut();
+        window.localStorage.removeItem(pendingEmailSignup);
+        setLoading(false);
+        if (profileError) { setNotice(`Could not finish account creation: ${profileError.message}`); return; }
+        setAuthMode("login");
+        setNotice("Your account was created. Please sign in.");
+        return;
+      }
       if (!data.session) {
         setVerificationEmail(email);
         setVerificationName(fullName);
@@ -151,8 +193,14 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
     }
 
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) { setLoading(false); setNotice("Incorrect email or password. Check your details or create an account first."); return; }
-    const { data: profile } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
+    if (error) { setLoading(false); setNotice("Incorrect email or password. If you do not have an account, please create one first."); return; }
+    const { data: profile, error: profileError } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
+    if (profileError) {
+      await supabase.auth.signOut();
+      setLoading(false);
+      setNotice(`Could not check your account: ${profileError.message}`);
+      return;
+    }
     if (!profile?.registered) {
       await supabase.auth.signOut();
       setLoading(false);
@@ -168,24 +216,38 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
     if (!supabase || verificationCode.length < 6) { setNotice("Enter the verification code from your email."); return; }
     setLoading(true);
     window.localStorage.setItem(emailVerificationInProgress, "true");
-    const { data, error } = await supabase.auth.verifyOtp({ email: verificationEmail, token: verificationCode, type: "signup" });
-    if (error || !data.user) { window.localStorage.removeItem(emailVerificationInProgress); setLoading(false); setNotice(error?.message || "Email verification failed. Please try again."); return; }
-    const { error: profileError } = await supabase.from("profiles").upsert({ id: data.user.id, email: data.user.email || verificationEmail, registered: true, full_name: verificationName || null }, { onConflict: "id" });
-    if (profileError) { window.localStorage.removeItem(emailVerificationInProgress); setLoading(false); setNotice(`Could not finish registration: ${profileError.message}`); return; }
-    window.localStorage.removeItem(pendingEmailSignup);
-    window.localStorage.removeItem(emailVerificationInProgress);
-    await supabase.auth.signOut();
-    router.push("/login");
-    setVerificationCode("");
+    try {
+      const { data, error } = await supabase.auth.verifyOtp({ email: verificationEmail, token: verificationCode, type: "signup" });
+      if (error || !data.user) { setNotice(error?.message || "Email verification failed. Please try again."); return; }
+      const { error: profileError } = await supabase.from("profiles").upsert({ id: data.user.id, email: data.user.email || verificationEmail, registered: true, full_name: verificationName || null }, { onConflict: "id" });
+      if (profileError) { setNotice(`Could not finish registration: ${profileError.message}`); return; }
+      window.localStorage.removeItem(pendingEmailSignup);
+      setVerificationCode("");
+      setRecoveryReady(false);
+      setAuthMode("login");
+      setNotice("Your account was created. Please sign in with the same email and password.");
+      setLoading(false);
+      void supabase.auth.signOut();
+      router.replace("/login");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Email verification failed. Please try again.");
+    } finally {
+      window.localStorage.removeItem(emailVerificationInProgress);
+      setLoading(false);
+    }
   }
 
   async function resendVerificationCode() {
     if (!supabase || !verificationEmail || resendCooldown > 0) return;
     setLoading(true);
+    setVerificationCode("");
+    setNotice("Sending a new verification code...");
     const { error } = await supabase.auth.resend({ type: "signup", email: verificationEmail });
     setLoading(false);
     if (!error) setResendCooldown(60);
-    setNotice(error ? `Could not resend verification email: ${error.message}` : "A new verification code was sent. Check your email and spam folder.");
+    setNotice(error
+      ? `Could not resend verification email: ${error.message}`
+      : "A new verification code was sent. Check your email and spam folder. The previous code is no longer valid.");
   }
 
   const isRegister = authMode === "register";
@@ -210,7 +272,6 @@ export default function AuthPage({ mode }: { mode: AuthMode | "reset" }) {
           {notice && <p className="auth-page-notice" role="alert">{notice}</p>}
           <button className="primary-button full" type="submit" disabled={loading}>{loading ? "Please wait..." : isRegister ? "Create account" : isForgot ? "Send reset link" : isReset ? "Update password" : "Sign in"}</button>
         </form>}
-        {!isForgot && !isReset && !isVerify && <button className="google-auth-button" type="button" onClick={() => void handleGoogle()}><FaGoogle aria-hidden="true" /> <span>Continue with Google</span></button>}
         <div className="auth-links">
           {authMode === "login" && <button className="text-button" onClick={() => { setAuthMode("forgot"); setNotice(""); }}>Forgot password?</button>}
           {(isForgot || isReset || isVerify) && <button className="text-button" onClick={() => { setAuthMode("login"); setNotice(""); }}>Back to sign in</button>}
