@@ -21,6 +21,8 @@ const demoReports: Report[] = [
 ];
 const provinces = ["All provinces", "Koshi", "Madhesh", "Bagmati", "Gandaki", "Lumbini", "Karnali", "Sudurpashchim"];
 const productionAuthRedirect = "https://nepalreconnect.ccrcitclub.com";
+const pendingEmailSignup = "pending-email-signup";
+const emailVerificationInProgress = "email-verification-in-progress";
 const hiddenReportId = "NR-26-26869";
 
 function uniqueReports(reports: Report[]): Report[] {
@@ -110,14 +112,29 @@ export default function Home() {
     if (!email || !password) { setNotice("Enter your email and password."); return; }
     if (authMode === "register") {
       window.localStorage.removeItem("google-auth-mode");
-      const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } });
+      window.localStorage.setItem(pendingEmailSignup, "true");
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: fullName },
+          emailRedirectTo: window.location.hostname === "localhost" ? `${window.location.origin}/login` : `${productionAuthRedirect}/login`,
+        },
+      });
       if (error) {
+        window.localStorage.removeItem(pendingEmailSignup);
         setNotice(error.message.toLowerCase().includes("already") || error.message.toLowerCase().includes("registered")
           ? "Your account already exists. Please sign in."
           : `Account creation failed: ${error.message}`);
         return;
       }
+      if (!data.user) {
+        window.localStorage.removeItem(pendingEmailSignup);
+        setNotice("Account creation did not complete. Please try again.");
+        return;
+      }
       if (data.user && (!data.user.identities || data.user.identities.length === 0)) {
+        window.localStorage.removeItem(pendingEmailSignup);
         setNotice("Your account already exists. Please sign in.");
         setAuthMode("login");
         return;
@@ -132,13 +149,17 @@ export default function Home() {
         setNotice("Verification code sent. Check your email.");
         return;
       }
-      if (registeredUser) await supabase.from("profiles").update({ registered: true, full_name: fullName || null }).eq("id", registeredUser.id);
+      if (registeredUser) {
+        const { error: profileError } = await supabase.from("profiles").update({ registered: true, full_name: fullName || null }).eq("id", registeredUser.id);
+        if (profileError) { setNotice(`Could not finish account creation: ${profileError.message}`); return; }
+      }
+      window.localStorage.removeItem(pendingEmailSignup);
       await supabase.auth.signOut();
       router.push("/login");
       return;
     }
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) { setNotice("Your account is not registered or the password is incorrect. Create an account first."); return; }
+    if (error) { setNotice("Incorrect email or password. Check your details or create an account first."); return; }
     setUserId(data.user.id); setUser(email);
     const { data: profile } = await supabase.from("profiles").select("registered").eq("id", data.user.id).maybeSingle();
     if (!profile?.registered) { await supabase.auth.signOut(); setUser(null); setUserId(null); setNotice("Your account is not registered or has not been verified. Create an account first."); return; }
@@ -148,10 +169,16 @@ export default function Home() {
   async function verifyEmailCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     logoutInProgress.current = false;
-    if (!supabase || verificationCode.trim().length !== 8) { setNotice("Enter the 8-digit verification code from your email."); return; }
+    if (!supabase || verificationCode.trim().length < 6) { setNotice("Enter the verification code from your email."); return; }
+    window.localStorage.setItem(emailVerificationInProgress, "true");
     const { data, error } = await supabase.auth.verifyOtp({ email: verificationEmail, token: verificationCode.trim(), type: "signup" });
-    if (error) { setNotice(`Email verification failed: ${error.message}`); return; }
-    if (data.user) await supabase.from("profiles").update({ registered: true, full_name: verificationName || null }).eq("id", data.user.id);
+    if (error) { window.localStorage.removeItem(emailVerificationInProgress); setNotice(`Email verification failed: ${error.message}`); return; }
+    if (data.user) {
+      const { error: profileError } = await supabase.from("profiles").update({ registered: true, full_name: verificationName || null }).eq("id", data.user.id);
+      if (profileError) { window.localStorage.removeItem(emailVerificationInProgress); setNotice(`Could not finish registration: ${profileError.message}`); return; }
+    }
+    window.localStorage.removeItem(pendingEmailSignup);
+    window.localStorage.removeItem(emailVerificationInProgress);
     await supabase.auth.signOut();
     router.push("/login");
   }
@@ -171,6 +198,15 @@ export default function Home() {
   async function finishGoogleAuth(sessionUser: User, announce = true) {
     if (!supabase) return;
     if (logoutInProgress.current) return;
+    if (window.localStorage.getItem(emailVerificationInProgress) === "true") return;
+    if (window.localStorage.getItem(pendingEmailSignup) === "true") {
+      const { error } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
+      window.localStorage.removeItem(pendingEmailSignup);
+      await supabase.auth.signOut();
+      if (error) { setNotice(`Could not finish account verification: ${error.message}`); return; }
+      window.location.href = "/login";
+      return;
+    }
     const mode = window.localStorage.getItem("google-auth-mode");
     setUserId(sessionUser.id);
     setUser(sessionUser.email || sessionUser.user_metadata?.full_name || "Google user");
@@ -183,7 +219,8 @@ export default function Home() {
       return;
     }
     if (mode === "register") {
-      await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
+      const { error } = await supabase.from("profiles").upsert({ id: sessionUser.id, email: sessionUser.email || "", registered: true, full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || null }, { onConflict: "id" });
+      if (error) { await supabase.auth.signOut(); setUser(null); setUserId(null); setNotice(`Could not create your account: ${error.message}`); return; }
     }
     window.localStorage.removeItem("google-auth-mode");
     setShowAuth(false);
@@ -325,7 +362,7 @@ export default function Home() {
     reportSubmitInProgress.current = false;
   }
 
-  if (showVerification) return <main className="site-shell verification-page"><section className="verification-card"><span className="brand-mark large">NR</span><p className="eyebrow">Verify your email</p><h1>Check your inbox</h1><p>We sent an 8-digit verification code to <strong>{verificationEmail}</strong>.</p><p className="verification-hint">Can&apos;t find it? Please check your spam or junk folder.</p><form onSubmit={verifyEmailCode}><label>8-digit verification code<input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" pattern="[0-9]{8}" maxLength={8} autoFocus required /></label><button className="primary-button full" type="submit">Verify email</button></form><button className="text-button center" onClick={() => { window.localStorage.removeItem("google-auth-mode"); setShowVerification(false); setAuthMode("register"); setShowAuth(true); }}>Back to account</button></section></main>;
+  if (showVerification) return <main className="site-shell verification-page"><section className="verification-card"><span className="brand-mark large">NR</span><p className="eyebrow">Verify your email</p><h1>Check your inbox</h1><p>We sent a verification code to <strong>{verificationEmail}</strong>.</p><p className="verification-hint">Can&apos;t find it? Please check your spam or junk folder.</p><form onSubmit={verifyEmailCode}><label>Verification code<input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" pattern="[0-9]{6,8}" minLength={6} maxLength={8} autoFocus required /></label><button className="primary-button full" type="submit">Verify email</button></form><button className="text-button center" onClick={() => { window.localStorage.removeItem("google-auth-mode"); window.localStorage.removeItem(pendingEmailSignup); setShowVerification(false); setAuthMode("register"); setShowAuth(true); }}>Back to account</button></section></main>;
   return <main className="site-shell">
     <header className="topbar"><button className="brand" onClick={() => { setView("home"); setMenuOpen(false); }} aria-label="Nepal Reconnect home"><Image className="brand-logo" src="/media/nepalreconnect.png" alt="Nepal Reconnect" width={2200} height={700} priority /></button><nav><button className={view === "home" ? "active" : ""} onClick={() => { setView("home"); setMenuOpen(false); }}>Home</button><button className={view === "reports" ? "active" : ""} onClick={() => { setView("reports"); setMenuOpen(false); }}>Public reports</button><button onClick={() => { setMenuOpen(false); userId ? setView(userRole === "admin" ? "admin" : "dashboard") : openAuth(); }}>My dashboard</button></nav><div className="account">{userId ? <button className="outline-button" onClick={() => void handleLogout()}>Log out</button> : <button className="outline-button" onClick={() => openAuth()}>Sign in</button>}<button className="menu-button" type="button" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>☰</button></div></header>
     {notice && !showAuth && !showVerification && <div className="notice" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
